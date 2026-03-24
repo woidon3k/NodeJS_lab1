@@ -1,9 +1,9 @@
 const burgerBtn = document.getElementById('burger-btn');
 const navMenu = document.getElementById('nav-menu');
 
-burgerBtn.addEventListener('click', () => {
-    navMenu.classList.toggle('open');
-});
+const sequelize = require('./config/database');
+
+
 
 const productsMock = [
     { id: '101', name: 'Молоко Яготинське 2.6%', category: 'Молочні продукти', price: 42.50, stock: 24, daysToExpire: 14 },
