@@ -1,7 +1,6 @@
 const burgerBtn = document.getElementById('burger-btn');
 const navMenu = document.getElementById('nav-menu');
 
-const sequelize = require('./config/database');
 
 
 
