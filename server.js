@@ -9,6 +9,10 @@ const morgan = require("morgan");
 const winston = require("winston");
 const multer = require("multer");
 
+const helmet = require("helmet");
+const { body, validationResult } = require("express-validator");
+const NodeCache = require("node-cache");
+
 const sequelize = require("./config/database");
 const User = require("./models/User");
 const authenticateToken = require("./middleware/auth");
@@ -16,6 +20,9 @@ const authorizeRoles = require("./middleware/role");
 
 const SECRET_KEY = process.env.JWT_SECRET || "fallback_secret_key";
 const app = express();
+
+const cache = new NodeCache({ stdTTL: 60 }); // 60 sec for cache
+app.use(helmet());
 
 // ensure the uploads directory exists
 const uploadDir = path.join(__dirname, "uploads");
@@ -157,6 +164,30 @@ app.patch("/change-password", authenticateToken, async (req, res) => {
   }
 });
 
+// Caching Example Route
+app.get(
+  "/users",
+  authenticateToken,
+  authorizeRoles("manager"),
+  async (req, res) => {
+    const cachedUsers = cache.get("all_users");
+    if (cachedUsers) {
+      return res.json({ source: "cache", data: cachedUsers });
+    }
+
+    try {
+      const users = await User.findAll({
+        attributes: { exclude: ["password"] },
+      });
+      cache.set("all_users", users);
+      res.json({ source: "database", data: users });
+    } catch (error) {
+      logger.error(error.message);
+      res.status(500).json({ message: "Помилка сервера" });
+    }
+  },
+);
+
 app.delete(
   "/users/:id",
   authenticateToken,
@@ -171,6 +202,7 @@ app.delete(
       }
 
       await user.destroy();
+      cache.del("all_users"); // invalidate cache
       res.json({
         message: `Користувача з ID ${userIdToDelete} видалено менеджером`,
       });
@@ -203,7 +235,7 @@ app.post("/login", loginLimiter, async (req, res) => {
         .json({ message: "Email or password is incorrect" });
     }
   } catch (error) {
-    console.error(error); // Fix: pass error to console.error
+    console.error(error);
     return res.status(500).json({ message: "Server Error" });
   }
 });
@@ -212,50 +244,75 @@ app.post("/logout", (req, res) => {
   res.json({ message: "Вихід виконано. Видаліть токен із заголовків запиту." });
 });
 
-app.post("/register", async (req, res) => {
-  try {
-    const { name, email, password, password_confirmation, role } = req.body;
+// data validation added to /register
+app.post(
+  "/register",
+  [
+    body("name").trim().notEmpty().withMessage("Ім'я є обов'язковим").escape(),
+    body("email")
+      .isEmail()
+      .withMessage("Некоректний формат email")
+      .normalizeEmail(),
+    body("password")
+      .isLength({ min: 6 })
+      .withMessage("Пароль має містити мінімум 6 символів"),
+    body("role")
+      .optional()
+      .isIn(["manager", "cashier"])
+      .withMessage("Некоректна роль"),
+  ],
+  async (req, res) => {
+    try {
+      // validation results
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
 
-    if (!name || !email || !password) {
-      return res.status(400).json({ message: "All fields are required" });
+      const { name, email, password, password_confirmation, role } = req.body;
+
+      if (!name || !email || !password) {
+        return res.status(400).json({ message: "All fields are required" });
+      }
+
+      if (password !== password_confirmation) {
+        return res.status(400).json({ message: "Passwords do not match" });
+      }
+
+      if (password.length < 6) {
+        return res.status(400).json({ message: "Password too short" });
+      }
+
+      const userExists = await User.findOne({ where: { email } });
+      if (userExists) {
+        return res.status(400).json({ message: "User already exists" });
+      }
+
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      const newUser = await User.create({
+        name,
+        email,
+        password: hashedPassword,
+        role: role || "cashier",
+      });
+
+      cache.del("all_users"); // invalidate cache
+
+      res
+        .status(201)
+        .json({ message: "User created successfully", userId: newUser.id });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ message: "Server error" });
     }
-
-    if (password !== password_confirmation) {
-      return res.status(400).json({ message: "Passwords do not match" });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({ message: "Password too short" });
-    }
-
-    const userExists = await User.findOne({ where: { email } });
-    if (userExists) {
-      return res.status(400).json({ message: "User already exists" });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const newUser = await User.create({
-      name,
-      email,
-      password: hashedPassword,
-      role: role || "cashier",
-    });
-
-    res
-      .status(201)
-      .json({ message: "User created successfully", userId: newUser.id });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Server error" });
-  }
-});
+  },
+);
 
 // global error handler
 app.use((err, req, res, next) => {
-  logger.error(`Помилка: ${err.message}`);
+  logger.error(`Помилка: ${err.message}`); // catch Multer errors
 
-  // catch Multer errors
   if (
     err instanceof multer.MulterError ||
     err.message.includes("Неправильний формат")
@@ -267,6 +324,11 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-sequelize.sync().then(() => {
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-});
+// only start the server if this file is run directly (not by Jest)
+if (require.main === module) {
+  sequelize.sync().then(() => {
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  });
+}
+
+module.exports = app;
