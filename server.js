@@ -13,6 +13,9 @@ const helmet = require("helmet");
 const { body, validationResult } = require("express-validator");
 const NodeCache = require("node-cache");
 
+const swaggerUi = require("swagger-ui-express");
+const swaggerDocument = require("./swagger.js");
+
 const sequelize = require("./config/database");
 const User = require("./models/User");
 const authenticateToken = require("./middleware/auth");
@@ -23,6 +26,8 @@ const app = express();
 
 const cache = new NodeCache({ stdTTL: 60 }); // 60 sec for cache
 app.use(helmet());
+
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // ensure the uploads directory exists
 const uploadDir = path.join(__dirname, "uploads");
